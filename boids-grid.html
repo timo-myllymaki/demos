@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pixi Boids Grid</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #000000;
+      }
+      #app canvas {
+        display: block;
+      }
+      .controls {
+        position: fixed;
+        left: 16px;
+        top: 16px;
+        z-index: 10;
+        display: grid;
+        grid-template-columns: auto 200px 56px;
+        align-items: center;
+        gap: 10px 12px;
+        padding: 12px 16px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+        font:
+          14px/1 system-ui,
+          sans-serif;
+        color: #222;
+      }
+.controls[hidden] { display: none; }
+      .controls input[type="range"] {
+        width: 100%;
+      }
+      .controls input[type="color"] {
+        width: 44px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        background: none;
+        cursor: pointer;
+      }
+      .controls output {
+        font-variant-numeric: tabular-nums;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controls">
+      <label for="count">Boids</label>
+      <input id="count" type="range" min="10" max="400" step="2" value="200" />
+      <output id="countValue">1100</output>
+
+      <label for="psize">Boid size</label>
+      <input id="psize" type="range" min="4" max="400" step="1" value="15" />
+      <output id="psizeValue">15px</output>
+
+      <label for="radius">Perception</label>
+      <input id="radius" type="range" min="20" max="160" step="1" value="64" />
+      <output id="radiusValue">64px</output>
+
+      <label for="sep">Separation</label>
+      <input id="sep" type="range" min="0" max="200" step="1" value="90" />
+      <output id="sepValue">0.90</output>
+
+      <label for="ali">Alignment</label>
+      <input id="ali" type="range" min="0" max="200" step="1" value="70" />
+      <output id="aliValue">0.70</output>
+
+      <label for="coh">Cohesion</label>
+      <input id="coh" type="range" min="0" max="200" step="1" value="50" />
+      <output id="cohValue">0.50</output>
+
+      <label for="bg">Background</label>
+      <input id="bg" type="color" value="#000000" />
+      <output id="bgValue">#000000</output>
+
+    <label>FPS</label>
+    <output id="fpsValue" style="grid-column: 2 / 4; text-align: right;">60</output>
+    </div>
+
+    <div id="app"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/8.6.6/pixi.min.js"></script>
+    <script>
+      // --- Boids (flocking) ------------------------------------------
+      // Each image particle steers by three rules against neighbours found
+      // through a spatial hash: separation, alignment, cohesion. A ping-pong
+      // render texture leaves wakes. Murmurations that split and rejoin.
+      (async () => {
+        const MAX_SPEED = 3.4;
+        const MAX_FORCE = 0.09;
+        const IMAGE_URL = "./img/inderes_logo.svg";
+
+        const bgInput = document.getElementById("bg");
+        const bgValue = document.getElementById("bgValue");
+        const app = new PIXI.Application();
+        await app.init({
+          background: bgInput.value,
+          resizeTo: window,
+          antialias: true,
+        });
+        document.getElementById("app").appendChild(app.canvas);
+    const fpsValue = document.getElementById('fpsValue');
+    let fpsFrames = 0, fpsLast = performance.now();
+    app.ticker.add(() => {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - fpsLast >= 500) {
+        fpsValue.textContent = Math.round((fpsFrames * 1000) / (now - fpsLast));
+        fpsFrames = 0;
+        fpsLast = now;
+      }
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        const panel = document.querySelector('.controls');
+        if (panel) panel.hidden = !panel.hidden;
+      }
+    });
+        bgInput.addEventListener("input", () => {
+          bgValue.textContent = bgInput.value;
+          app.renderer.background.color = bgInput.value;
+          document.body.style.background = bgInput.value;
+        });
+
+        const image = new Image();
+        image.src = IMAGE_URL;
+        await image.decode();
+        const tex = PIXI.Texture.from(image);
+
+        const scene = new PIXI.Container();
+        const prevLayer = new PIXI.Sprite();
+        const boidLayer = new PIXI.Container();
+        scene.addChild(prevLayer, boidLayer);
+        const output = new PIXI.Sprite();
+        app.stage.addChild(output);
+
+        let rtA = null,
+          rtB = null;
+        function makeTargets() {
+          const w = Math.max(1, app.screen.width),
+            h = Math.max(1, app.screen.height);
+          rtA && rtA.destroy(true);
+          rtB && rtB.destroy(true);
+          rtA = PIXI.RenderTexture.create({ width: w, height: h });
+          rtB = PIXI.RenderTexture.create({ width: w, height: h });
+          output.texture = rtA;
+        }
+        makeTargets();
+
+        const boids = [];
+        const pool = [];
+        function setCount(n) {
+          while (pool.length < n) {
+            const s = new PIXI.Sprite(tex);
+            s.anchor.set(0.5);
+            pool.push(s);
+            boidLayer.addChild(s);
+          }
+          boids.length = 0;
+          for (let i = 0; i < pool.length; i++) {
+            const s = pool[i];
+            if (i < n) {
+              s.visible = true;
+              const a = Math.random() * Math.PI * 2;
+              boids.push({
+                x: Math.random() * app.screen.width,
+                y: Math.random() * app.screen.height,
+                vx: Math.cos(a) * MAX_SPEED,
+                vy: Math.sin(a) * MAX_SPEED,
+                sprite: s,
+              });
+            } else s.visible = false;
+          }
+        }
+
+        const countSlider = document.getElementById("count");
+        const countValue = document.getElementById("countValue");
+        const psizeSlider = document.getElementById("psize");
+        const psizeValue = document.getElementById("psizeValue");
+        const radiusSlider = document.getElementById("radius");
+        const radiusValue = document.getElementById("radiusValue");
+        const sepSlider = document.getElementById("sep");
+        const sepValue = document.getElementById("sepValue");
+        const aliSlider = document.getElementById("ali");
+        const aliValue = document.getElementById("aliValue");
+        const cohSlider = document.getElementById("coh");
+        const cohValue = document.getElementById("cohValue");
+
+        countSlider.addEventListener("input", () => {
+          countValue.textContent = countSlider.value;
+          setCount(Number(countSlider.value));
+        });
+        psizeSlider.addEventListener("input", () => {
+          psizeValue.textContent = psizeSlider.value + "px";
+        });
+        radiusSlider.addEventListener("input", () => {
+          radiusValue.textContent = radiusSlider.value + "px";
+        });
+        sepSlider.addEventListener("input", () => {
+          sepValue.textContent = (Number(sepSlider.value) / 100).toFixed(2);
+        });
+        aliSlider.addEventListener("input", () => {
+          aliValue.textContent = (Number(aliSlider.value) / 100).toFixed(2);
+        });
+        cohSlider.addEventListener("input", () => {
+          cohValue.textContent = (Number(cohSlider.value) / 100).toFixed(2);
+        });
+
+        let lastW = 0,
+          lastH = 0;
+        function fitToWindow() {
+          const w = window.innerWidth,
+            h = window.innerHeight;
+          if (w === lastW && h === lastH) return;
+          lastW = w;
+          lastH = h;
+          app.renderer.resize(w, h);
+          makeTargets();
+        }
+        window.addEventListener("resize", fitToWindow);
+        window.addEventListener("orientationchange", fitToWindow);
+
+        setCount(Number(countSlider.value));
+
+        const grid = new Map(); // spatial hash: key -> array of boids
+        app.ticker.add(() => {
+          fitToWindow();
+          const R = Number(radiusSlider.value);
+          const R2 = R * R;
+          const wSep = Number(sepSlider.value) / 100;
+          const wAli = Number(aliSlider.value) / 100;
+          const wCoh = Number(cohSlider.value) / 100;
+          const psize = Number(psizeSlider.value);
+          const W = app.screen.width,
+            H = app.screen.height;
+          const cell = Math.max(16, R);
+
+          // rebuild hash
+          grid.clear();
+          for (const b of boids) {
+            const key = ((b.x / cell) | 0) + "," + ((b.y / cell) | 0);
+            let arr = grid.get(key);
+            if (!arr) {
+              arr = [];
+              grid.set(key, arr);
+            }
+            arr.push(b);
+          }
+
+          for (const b of boids) {
+            const cgx = (b.x / cell) | 0,
+              cgy = (b.y / cell) | 0;
+            let sx = 0,
+              sy = 0,
+              ax = 0,
+              ay = 0,
+              cx = 0,
+              cy = 0,
+              n = 0;
+            for (let gx = cgx - 1; gx <= cgx + 1; gx++) {
+              for (let gy = cgy - 1; gy <= cgy + 1; gy++) {
+                const arr = grid.get(gx + "," + gy);
+                if (!arr) continue;
+                for (const o of arr) {
+                  if (o === b) continue;
+                  const dx = b.x - o.x,
+                    dy = b.y - o.y;
+                  const d2 = dx * dx + dy * dy;
+                  if (d2 > R2 || d2 === 0) continue;
+                  sx += dx / d2;
+                  sy += dy / d2; // separation (stronger up close)
+                  ax += o.vx;
+                  ay += o.vy; // alignment
+                  cx += o.x;
+                  cy += o.y; // cohesion
+                  n++;
+                }
+              }
+            }
+
+            let fx = 0,
+              fy = 0;
+            if (n > 0) {
+              // separation
+              let m = Math.hypot(sx, sy);
+              if (m > 0) {
+                fx += ((sx / m) * MAX_SPEED - b.vx) * wSep;
+                fy += ((sy / m) * MAX_SPEED - b.vy) * wSep;
+              }
+              // alignment
+              m = Math.hypot(ax, ay);
+              if (m > 0) {
+                fx += ((ax / m) * MAX_SPEED - b.vx) * wAli;
+                fy += ((ay / m) * MAX_SPEED - b.vy) * wAli;
+              }
+              // cohesion
+              cx = cx / n - b.x;
+              cy = cy / n - b.y;
+              m = Math.hypot(cx, cy);
+              if (m > 0) {
+                fx += ((cx / m) * MAX_SPEED - b.vx) * wCoh;
+                fy += ((cy / m) * MAX_SPEED - b.vy) * wCoh;
+              }
+            }
+            const fm = Math.hypot(fx, fy);
+            if (fm > MAX_FORCE) {
+              fx = (fx / fm) * MAX_FORCE;
+              fy = (fy / fm) * MAX_FORCE;
+            }
+
+            b.vx += fx;
+            b.vy += fy;
+            const sp = Math.hypot(b.vx, b.vy);
+            if (sp > MAX_SPEED) {
+              b.vx = (b.vx / sp) * MAX_SPEED;
+              b.vy = (b.vy / sp) * MAX_SPEED;
+            }
+            b.x += b.vx;
+            b.y += b.vy;
+            if (b.x < 0) b.x += W;
+            else if (b.x > W) b.x -= W;
+            if (b.y < 0) b.y += H;
+            else if (b.y > H) b.y -= H;
+
+            b.sprite.x = b.x;
+            b.sprite.y = b.y;
+            b.sprite.rotation = Math.atan2(b.vy, b.vx);
+            b.sprite.width = psize;
+            b.sprite.height = psize;
+          }
+
+          prevLayer.texture = rtA;
+          prevLayer.alpha = 0.82;
+          app.renderer.render({ container: scene, target: rtB, clear: true });
+          const t = rtA;
+          rtA = rtB;
+          rtB = t;
+          output.texture = rtA;
+        });
+      })();
+    </script>
+  </body>
+</html>

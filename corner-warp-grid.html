@@ -1,0 +1,708 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pixi Corner Warp Grid</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #000000;
+      }
+      #app canvas {
+        display: block;
+      }
+      .controls {
+        /* Centered along the top edge (not a corner) so it never sits on top
+       of a draggable corner handle. */
+        position: fixed;
+        left: 50%;
+        top: 16px;
+        transform: translateX(-50%);
+        z-index: 10;
+        display: grid;
+        grid-template-columns: auto 200px 56px;
+        align-items: center;
+        gap: 10px 12px;
+        padding: 12px 16px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+        font:
+          14px/1 system-ui,
+          sans-serif;
+        color: #222;
+      }
+.controls[hidden] { display: none; }
+      .controls input[type="range"] {
+        width: 100%;
+      }
+      .controls input[type="color"] {
+        width: 44px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        background: none;
+        cursor: pointer;
+      }
+      .controls output {
+        font-variant-numeric: tabular-nums;
+      }
+      .controls button {
+        grid-column: 2 / 4;
+        width: 100%;
+        box-sizing: border-box;
+        font:
+          13px/1 system-ui,
+          sans-serif;
+        padding: 7px 6px;
+        border: 1px solid #bbb;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+      }
+      .controls button:hover {
+        background: #f2f2f2;
+      }
+      .tip[hidden] {
+        display: none;
+      }
+      .tip {
+        /* Centered along the bottom edge, same reasoning as .controls. */
+        position: fixed;
+        left: 50%;
+        bottom: 14px;
+        transform: translateX(-50%);
+        z-index: 10;
+        font:
+          12px/1 system-ui,
+          sans-serif;
+        color: #888;
+        background: rgba(255, 255, 255, 0.7);
+        padding: 6px 10px;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controls">
+      <label for="size">Square size</label>
+      <input id="size" type="range" min="10" max="400" step="1" value="46" />
+      <output id="sizeValue">46px</output>
+
+      <label for="amount">Effect amount</label>
+      <input id="amount" type="range" min="0" max="100" step="1" value="80" />
+      <output id="amountValue">80%</output>
+
+      <label for="speed">Flow speed</label>
+      <input id="speed" type="range" min="0.01" max="300" step="0.01" value="60" />
+      <output id="speedValue">60%</output>
+
+      <label for="freq">Flow scale</label>
+      <input id="freq" type="range" min="2" max="60" step="1" value="12" />
+      <output id="freqValue">0.12</output>
+
+      <label for="push">Drift distance</label>
+      <input id="push" type="range" min="0" max="80" step="1" value="24" />
+      <output id="pushValue">24px</output>
+
+      <button id="resetCrop" type="button">Reset crop (green)</button>
+
+      <button id="resetDistort" type="button">Reset distort (red)</button>
+
+      <button id="saveCalib" type="button">Save calibration</button>
+
+      <button id="loadCalib" type="button">Load calibration</button>
+
+    <label for="bg">Background</label>
+    <input id="bg" type="color" value="#000000" />
+    <output id="bgValue">#000000</output>
+
+    <label>FPS</label>
+    <output id="fpsValue" style="grid-column: 2 / 4; text-align: right;">60</output>
+    </div>
+
+    <div class="tip">drag green to crop, red to distort &nbsp;&middot;&nbsp; C / D toggle handles</div>
+    <div id="app"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/8.6.6/pixi.min.js"></script>
+    <script>
+      // --- 3D simplex noise (public domain, after Stefan Gustavson) -----------
+      const noise3D = (() => {
+        const grad3 = [
+          1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1, 0, 1, 0, 1, -1, 0, 1, 1, 0, -1,
+          -1, 0, -1, 0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1,
+        ];
+        const p = new Uint8Array(256);
+        for (let i = 0; i < 256; i++) p[i] = i;
+        let seed = 1337;
+        const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+        for (let i = 255; i > 0; i--) {
+          const j = Math.floor(rand() * (i + 1));
+          [p[i], p[j]] = [p[j], p[i]];
+        }
+        const perm = new Uint8Array(512),
+          permMod12 = new Uint8Array(512);
+        for (let i = 0; i < 512; i++) {
+          perm[i] = p[i & 255];
+          permMod12[i] = perm[i] % 12;
+        }
+        const F3 = 1 / 3,
+          G3 = 1 / 6;
+        return function (x, y, z) {
+          let n0, n1, n2, n3;
+          const s = (x + y + z) * F3;
+          const i = Math.floor(x + s),
+            j = Math.floor(y + s),
+            k = Math.floor(z + s);
+          const t = (i + j + k) * G3;
+          const x0 = x - (i - t),
+            y0 = y - (j - t),
+            z0 = z - (k - t);
+          let i1, j1, k1, i2, j2, k2;
+          if (x0 >= y0) {
+            if (y0 >= z0) {
+              i1 = 1;
+              j1 = 0;
+              k1 = 0;
+              i2 = 1;
+              j2 = 1;
+              k2 = 0;
+            } else if (x0 >= z0) {
+              i1 = 1;
+              j1 = 0;
+              k1 = 0;
+              i2 = 1;
+              j2 = 0;
+              k2 = 1;
+            } else {
+              i1 = 0;
+              j1 = 0;
+              k1 = 1;
+              i2 = 1;
+              j2 = 0;
+              k2 = 1;
+            }
+          } else {
+            if (y0 < z0) {
+              i1 = 0;
+              j1 = 0;
+              k1 = 1;
+              i2 = 0;
+              j2 = 1;
+              k2 = 1;
+            } else if (x0 < z0) {
+              i1 = 0;
+              j1 = 1;
+              k1 = 0;
+              i2 = 0;
+              j2 = 1;
+              k2 = 1;
+            } else {
+              i1 = 0;
+              j1 = 1;
+              k1 = 0;
+              i2 = 1;
+              j2 = 1;
+              k2 = 0;
+            }
+          }
+          const x1 = x0 - i1 + G3,
+            y1 = y0 - j1 + G3,
+            z1 = z0 - k1 + G3;
+          const x2 = x0 - i2 + 2 * G3,
+            y2 = y0 - j2 + 2 * G3,
+            z2 = z0 - k2 + 2 * G3;
+          const x3 = x0 - 1 + 3 * G3,
+            y3 = y0 - 1 + 3 * G3,
+            z3 = z0 - 1 + 3 * G3;
+          const ii = i & 255,
+            jj = j & 255,
+            kk = k & 255;
+          let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+          if (t0 < 0) n0 = 0;
+          else {
+            const gi0 = permMod12[ii + perm[jj + perm[kk]]] * 3;
+            t0 *= t0;
+            n0 =
+              t0 *
+              t0 *
+              (grad3[gi0] * x0 + grad3[gi0 + 1] * y0 + grad3[gi0 + 2] * z0);
+          }
+          let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+          if (t1 < 0) n1 = 0;
+          else {
+            const gi1 = permMod12[ii + i1 + perm[jj + j1 + perm[kk + k1]]] * 3;
+            t1 *= t1;
+            n1 =
+              t1 *
+              t1 *
+              (grad3[gi1] * x1 + grad3[gi1 + 1] * y1 + grad3[gi1 + 2] * z1);
+          }
+          let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+          if (t2 < 0) n2 = 0;
+          else {
+            const gi2 = permMod12[ii + i2 + perm[jj + j2 + perm[kk + k2]]] * 3;
+            t2 *= t2;
+            n2 =
+              t2 *
+              t2 *
+              (grad3[gi2] * x2 + grad3[gi2 + 1] * y2 + grad3[gi2 + 2] * z2);
+          }
+          let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+          if (t3 < 0) n3 = 0;
+          else {
+            const gi3 = permMod12[ii + 1 + perm[jj + 1 + perm[kk + 1]]] * 3;
+            t3 *= t3;
+            n3 =
+              t3 *
+              t3 *
+              (grad3[gi3] * x3 + grad3[gi3 + 1] * y3 + grad3[gi3 + 2] * z3);
+          }
+          return 32 * (n0 + n1 + n2 + n3);
+        };
+      })();
+
+      // --- Flow field, with independent distort + crop grids ------------------
+      // Same flow-field effect as flow-grid.html, rendered into an off-screen
+      // texture, then two 5x5 grids of draggable handles (every 25% of
+      // width/height) act on it in sequence:
+      //   1) Distort (red)  — a MeshPlane warps the texture itself, pulling
+      //      pixels toward moved handles (a free-form puppet warp).
+      //   2) Crop / mask (green) — applied after the warp, purely as a mask
+      //      made of filled quads; it reveals/hides regions of the already-
+      //      warped result without stretching pixels further.
+      // 'C' toggles the crop handles, 'D' toggles the distort handles, and F2
+      // hides both plus the settings panel.
+      (async () => {
+        const GAP = 1;
+        const TWO_PI = Math.PI * 2;
+        const TIME_SPEED = 0.0008;
+        const SCROLL_SPEED = 0.0011; // field slowly translates so patterns swim
+        const IMAGE_URL = "./img/inderes_logo.svg";
+        const HANDLE_R = 9;
+        let panelHidden = false;
+        let cropVisible = true;
+        let distortVisible = true;
+
+        const bgInput = document.getElementById('bg');
+        const bgValue = document.getElementById('bgValue');
+        const app = new PIXI.Application();
+        await app.init({
+          background: bgInput.value,
+          resizeTo: window,
+          antialias: true,
+        });
+        document.getElementById("app").appendChild(app.canvas);
+    const fpsValue = document.getElementById('fpsValue');
+    let fpsFrames = 0, fpsLast = performance.now();
+    app.ticker.add(() => {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - fpsLast >= 500) {
+        fpsValue.textContent = Math.round((fpsFrames * 1000) / (now - fpsLast));
+        fpsFrames = 0;
+        fpsLast = now;
+      }
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        const panel = document.querySelector('.controls');
+        if (panel) panel.hidden = !panel.hidden;
+        panelHidden = !!(panel && panel.hidden);
+        const tip = document.querySelector('.tip');
+        if (tip) tip.hidden = panelHidden;
+      } else if (e.key === 'c' || e.key === 'C') {
+        cropVisible = !cropVisible;
+      } else if (e.key === 'd' || e.key === 'D') {
+        distortVisible = !distortVisible;
+      }
+    });
+        bgInput.addEventListener('input', () => {
+          bgValue.textContent = bgInput.value;
+          app.renderer.background.color = bgInput.value;
+          document.body.style.background = bgInput.value;
+        });
+
+        const image = new Image();
+        image.src = IMAGE_URL;
+        await image.decode();
+        const squareTexture = PIXI.Texture.from(image);
+
+        // The flow-field grid is drawn into this off-screen scene, never added
+        // to app.stage directly -- it is only ever rendered into a texture.
+        const scene = new PIXI.Container();
+        const grid = new PIXI.Container();
+        scene.addChild(grid);
+        const pool = [];
+        const squares = [];
+
+        function buildGrid(squareSize) {
+          const cols = Math.ceil(app.screen.width / squareSize);
+          const rows = Math.ceil(app.screen.height / squareSize);
+          const needed = cols * rows;
+          while (pool.length < needed) {
+            const sprite = new PIXI.Sprite(squareTexture);
+            sprite.anchor.set(0.5);
+            pool.push(sprite);
+            grid.addChild(sprite);
+          }
+          squares.length = 0;
+          let i = 0;
+          for (let row = 0; row < rows; row++) {
+            for (let col = 0; col < cols; col++) {
+              const sprite = pool[i++];
+              sprite.visible = true;
+              sprite.width = squareSize - GAP;
+              sprite.height = squareSize - GAP;
+              const baseX = col * squareSize + squareSize / 2;
+              const baseY = row * squareSize + squareSize / 2;
+              sprite.x = baseX;
+              sprite.y = baseY;
+              squares.push({ sprite, col, row, baseX, baseY });
+            }
+          }
+          for (; i < pool.length; i++) pool[i].visible = false;
+        }
+
+        // --- Two independent deformable grids ------------------------------
+        // Distort (red): a MeshPlane that warps the flow-field texture.
+        // Crop / mask (green): applied after, purely as a mask of filled
+        // quads — reveals/hides regions without further stretching pixels.
+        const GRID_N = 5; // handles per axis: 0%, 25%, 50%, 75%, 100%
+        const GREEN = 0x2bae66;
+        const RED = 0xff3b30;
+
+        function makeGrid() {
+          const g = [];
+          for (let row = 0; row < GRID_N; row++)
+            for (let col = 0; col < GRID_N; col++)
+              g.push({ u: col / (GRID_N - 1), v: row / (GRID_N - 1) });
+          return g;
+        }
+
+        let cropCorners = makeGrid();
+        let distortCorners = makeGrid();
+        function resetCrop() {
+          cropCorners = makeGrid();
+        }
+        function resetDistort() {
+          distortCorners = makeGrid();
+        }
+
+        // --- Calibration save/load (localStorage) --------------------------
+        // Persists the two handle grids so alignment against a physical
+        // surface survives closing/reopening this page, without touching the
+        // visual-effect sliders.
+        const CALIB_KEY = "pixiCornerWarpCalibration";
+        function saveCalibration() {
+          try {
+            localStorage.setItem(
+              CALIB_KEY,
+              JSON.stringify({ gridN: GRID_N, cropCorners, distortCorners })
+            );
+            return true;
+          } catch (e) {
+            return false;
+          }
+        }
+        function loadCalibration() {
+          try {
+            const data = JSON.parse(localStorage.getItem(CALIB_KEY));
+            const n = GRID_N * GRID_N;
+            if (
+              data &&
+              data.gridN === GRID_N &&
+              Array.isArray(data.cropCorners) &&
+              data.cropCorners.length === n &&
+              Array.isArray(data.distortCorners) &&
+              data.distortCorners.length === n
+            ) {
+              cropCorners = data.cropCorners;
+              distortCorners = data.distortCorners;
+              return true;
+            }
+          } catch (e) {}
+          return false;
+        }
+        function flashButton(btn, text) {
+          const original = btn.dataset.label || btn.textContent;
+          btn.dataset.label = original;
+          btn.textContent = text;
+          clearTimeout(btn.__flashTimer);
+          btn.__flashTimer = setTimeout(() => {
+            btn.textContent = original;
+          }, 1200);
+        }
+        const hadSavedCalibration = loadCalibration();
+
+        // Base render of the flow field, warped by the distort mesh, then
+        // shown full-screen (fixed position) and masked by the crop grid.
+        let baseTexture = null,
+          warpTexture = null;
+        const warpContainer = new PIXI.Container();
+        const warpMesh = new PIXI.MeshPlane({
+          texture: PIXI.Texture.EMPTY,
+          verticesX: GRID_N,
+          verticesY: GRID_N,
+        });
+        warpContainer.addChild(warpMesh);
+
+        const outputSprite = new PIXI.Sprite(PIXI.Texture.EMPTY);
+        outputSprite.eventMode = "none";
+        app.stage.addChild(outputSprite);
+        const maskGraphics = new PIXI.Graphics();
+        outputSprite.mask = maskGraphics;
+
+        function makeHandles(color, corners, onDragStart) {
+          const layer = new PIXI.Container();
+          app.stage.addChild(layer);
+          const outline = new PIXI.Graphics();
+          outline.eventMode = "none"; // grid lines must never block clicks on handles
+          app.stage.addChild(outline);
+          const handles = corners.map((_, i) => {
+            const h = new PIXI.Graphics()
+              .circle(0, 0, HANDLE_R)
+              .fill({ color: 0xffffff, alpha: 0.95 })
+              .stroke({ color, width: 3 });
+            h.eventMode = "static";
+            h.cursor = "grab";
+            h.hitArea = new PIXI.Circle(0, 0, HANDLE_R + 10); // easier to grab
+            h.on("pointerdown", (e) => {
+              onDragStart(i);
+              h.cursor = "grabbing";
+              e.stopPropagation();
+            });
+            layer.addChild(h);
+            return h;
+          });
+          return { layer, outline, handles };
+        }
+
+        const crop = makeHandles(GREEN, cropCorners, (i) => {
+          dragTarget = cropCorners;
+          dragHandles = crop.handles;
+          dragIndex = i;
+        });
+        const distort = makeHandles(RED, distortCorners, (i) => {
+          dragTarget = distortCorners;
+          dragHandles = distort.handles;
+          dragIndex = i;
+        });
+
+        function drawGridChrome(g, corners, color, visible) {
+          g.outline.visible = visible;
+          g.layer.visible = visible;
+          if (!visible) return;
+          const w = app.screen.width,
+            h = app.screen.height;
+          const px = corners.map((c) => [c.u * w, c.v * h]);
+          const at = (row, col) => px[row * GRID_N + col];
+          g.outline.clear();
+          for (let row = 0; row < GRID_N; row++) {
+            g.outline.moveTo(at(row, 0)[0], at(row, 0)[1]);
+            for (let col = 1; col < GRID_N; col++)
+              g.outline.lineTo(at(row, col)[0], at(row, col)[1]);
+          }
+          for (let col = 0; col < GRID_N; col++) {
+            g.outline.moveTo(at(0, col)[0], at(0, col)[1]);
+            for (let row = 1; row < GRID_N; row++)
+              g.outline.lineTo(at(row, col)[0], at(row, col)[1]);
+          }
+          g.outline.stroke({ color, width: 1.5, alpha: 0.6 });
+          for (let i = 0; i < g.handles.length; i++)
+            g.handles[i].position.set(px[i][0], px[i][1]);
+        }
+
+        let dragTarget = null,
+          dragHandles = null,
+          dragIndex = -1;
+        app.stage.eventMode = "static";
+        app.stage.hitArea = app.screen;
+        app.stage.on("pointermove", (e) => {
+          if (dragIndex < 0 || !dragTarget) return;
+          const w = app.screen.width,
+            h = app.screen.height;
+          dragTarget[dragIndex].u = e.global.x / w;
+          dragTarget[dragIndex].v = e.global.y / h;
+        });
+        function endDrag() {
+          if (dragIndex >= 0 && dragHandles) dragHandles[dragIndex].cursor = "grab";
+          dragIndex = -1;
+          dragTarget = null;
+          dragHandles = null;
+        }
+        app.stage.on("pointerup", endDrag);
+        app.stage.on("pointerupoutside", endDrag);
+
+        document.getElementById("resetCrop").addEventListener("click", resetCrop);
+        document
+          .getElementById("resetDistort")
+          .addEventListener("click", resetDistort);
+
+        const saveCalibBtn = document.getElementById("saveCalib");
+        const loadCalibBtn = document.getElementById("loadCalib");
+        saveCalibBtn.addEventListener("click", () => {
+          flashButton(saveCalibBtn, saveCalibration() ? "Saved!" : "Save failed");
+        });
+        loadCalibBtn.addEventListener("click", () => {
+          flashButton(loadCalibBtn, loadCalibration() ? "Loaded!" : "No saved calibration");
+        });
+
+        if (hadSavedCalibration) {
+          const tip = document.querySelector(".tip");
+          if (tip) {
+            const original = tip.textContent;
+            tip.textContent = "loaded saved calibration";
+            setTimeout(() => {
+              tip.textContent = original;
+            }, 2500);
+          }
+        }
+
+        const sizeSlider = document.getElementById("size");
+        const sizeValue = document.getElementById("sizeValue");
+        const amountSlider = document.getElementById("amount");
+        const amountValue = document.getElementById("amountValue");
+        const speedSlider = document.getElementById("speed");
+        const speedValue = document.getElementById("speedValue");
+        const freqSlider = document.getElementById("freq");
+        const freqValue = document.getElementById("freqValue");
+        const pushSlider = document.getElementById("push");
+        const pushValue = document.getElementById("pushValue");
+
+        function rebuild() {
+          const size = Number(sizeSlider.value);
+          sizeValue.textContent = size + "px";
+          buildGrid(size);
+        }
+        sizeSlider.addEventListener("input", rebuild);
+        amountSlider.addEventListener("input", () => {
+          amountValue.textContent = amountSlider.value + "%";
+        });
+        speedSlider.addEventListener("input", () => {
+          speedValue.textContent = speedSlider.value + "%";
+        });
+        freqSlider.addEventListener("input", () => {
+          freqValue.textContent = (Number(freqSlider.value) / 100).toFixed(2);
+        });
+        pushSlider.addEventListener("input", () => {
+          pushValue.textContent = pushSlider.value + "px";
+        });
+
+        function makeRenderTexture() {
+          const w = Math.max(1, app.screen.width),
+            h = Math.max(1, app.screen.height);
+          baseTexture && baseTexture.destroy(true);
+          warpTexture && warpTexture.destroy(true);
+          baseTexture = PIXI.RenderTexture.create({ width: w, height: h });
+          warpTexture = PIXI.RenderTexture.create({ width: w, height: h });
+          warpMesh.texture = baseTexture;
+          outputSprite.texture = warpTexture;
+        }
+
+        let lastW = 0,
+          lastH = 0;
+        function fitToWindow() {
+          const w = window.innerWidth,
+            h = window.innerHeight;
+          if (w === lastW && h === lastH) return;
+          lastW = w;
+          lastH = h;
+          app.renderer.resize(w, h);
+          app.stage.hitArea = app.screen;
+          makeRenderTexture();
+          buildGrid(Number(sizeSlider.value));
+        }
+        window.addEventListener("resize", fitToWindow);
+        window.addEventListener("orientationchange", fitToWindow);
+
+        let time = 0,
+          scroll = 0;
+        app.ticker.add((ticker) => {
+          fitToWindow();
+          const speed = Number(speedSlider.value) / 100;
+          const freq = Number(freqSlider.value) / 100;
+          const amount = Number(amountSlider.value) / 100;
+          const push = Number(pushSlider.value);
+          const cell = Number(sizeSlider.value) - GAP;
+          time += ticker.deltaMS * TIME_SPEED * speed;
+          scroll += ticker.deltaMS * SCROLL_SPEED * speed;
+
+          for (const s of squares) {
+            const sx = s.col * freq + scroll;
+            const sy = s.row * freq;
+            const angle = noise3D(sx, sy, time) * TWO_PI; // direction
+            const mag = 0.5 + 0.5 * noise3D(sx, sy, time + 100); // 0..1 flow speed
+            s.sprite.x = s.baseX + Math.cos(angle) * push * mag;
+            s.sprite.y = s.baseY + Math.sin(angle) * push * mag;
+            s.sprite.rotation = angle;
+            const level = mag;
+            const scale = 1 - amount * (1 - level);
+            const size = Math.max(0, cell * scale);
+            s.sprite.width = size;
+            s.sprite.height = size;
+          }
+
+          // Render the flow-field grid into the base texture.
+          app.renderer.render({
+            container: scene,
+            target: baseTexture,
+            clear: true,
+          });
+
+          const w = app.screen.width,
+            h = app.screen.height;
+
+          // Distort: push the red grid's pixel positions onto the mesh, then
+          // render it (sampling baseTexture) into the warp texture.
+          const distortPx = distortCorners.map((c) => [c.u * w, c.v * h]);
+          const wbuf = warpMesh.geometry.getBuffer("aPosition");
+          for (let i = 0; i < distortPx.length; i++) {
+            wbuf.data[i * 2] = distortPx[i][0];
+            wbuf.data[i * 2 + 1] = distortPx[i][1];
+          }
+          wbuf.update();
+          app.renderer.render({
+            container: warpContainer,
+            target: warpTexture,
+            clear: true,
+          });
+
+          // Crop / mask: rebuild as a grid of filled quads, one per cell, so
+          // each cell deforms independently as its four handles move.
+          const cropPx = cropCorners.map((c) => [c.u * w, c.v * h]);
+          const cropAt = (row, col) => cropPx[row * GRID_N + col];
+          maskGraphics.clear();
+          for (let row = 0; row < GRID_N - 1; row++) {
+            for (let col = 0; col < GRID_N - 1; col++) {
+              const tl = cropAt(row, col),
+                tr = cropAt(row, col + 1),
+                bl = cropAt(row + 1, col),
+                br = cropAt(row + 1, col + 1);
+              maskGraphics
+                .moveTo(tl[0], tl[1])
+                .lineTo(tr[0], tr[1])
+                .lineTo(br[0], br[1])
+                .lineTo(bl[0], bl[1])
+                .closePath()
+                .fill(0xffffff);
+            }
+          }
+
+          // Draw each grid's outline + handles, independently toggleable.
+          drawGridChrome(crop, cropCorners, GREEN, cropVisible && !panelHidden);
+          drawGridChrome(distort, distortCorners, RED, distortVisible && !panelHidden);
+        });
+
+        makeRenderTexture();
+        rebuild();
+      })();
+    </script>
+  </body>
+</html>

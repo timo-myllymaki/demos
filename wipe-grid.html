@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pixi Wipe Grid</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000000; }
+  #app canvas { display: block; }
+  .controls {
+    position: fixed; left: 16px; top: 16px; z-index: 10;
+    display: grid; grid-template-columns: auto 200px 56px;
+    align-items: center; gap: 10px 12px;
+    padding: 12px 16px; border-radius: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+    font: 14px/1 system-ui, sans-serif; color: #222;
+  }
+.controls[hidden] { display: none; }
+  .controls input[type="range"] { width: 100%; }
+  .controls input[type="color"] {
+    width: 44px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
+  }
+  .controls select {
+    grid-column: 2 / 4; width: 100%; box-sizing: border-box;
+    font: 13px/1 system-ui, sans-serif; padding: 4px 6px;
+    border: 1px solid #bbb; border-radius: 4px; background: #fff;
+  }
+  .controls output { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <div class="controls">
+    <label for="size">Square size</label>
+    <input id="size" type="range" min="10" max="400" step="1" value="40" />
+    <output id="sizeValue">40px</output>
+
+    <label for="speed">Wipe speed</label>
+    <input id="speed" type="range" min="0.01" max="120" step="0.01" value="35" />
+    <output id="speedValue">35</output>
+
+    <label for="band">Edge softness</label>
+    <input id="band" type="range" min="2" max="60" step="1" value="16" />
+    <output id="bandValue">16%</output>
+
+    <label for="spin">Edge spin</label>
+    <input id="spin" type="range" min="0" max="100" step="1" value="45" />
+    <output id="spinValue">45%</output>
+
+    <label for="shape">Shape</label>
+    <select id="shape">
+      <option value="diagonal" selected>diagonal</option>
+      <option value="bars">bars</option>
+      <option value="radial">radial</option>
+      <option value="wedge">wedge</option>
+      <option value="spiral">spiral</option>
+    </select>
+
+    <label for="bg">Background</label>
+    <input id="bg" type="color" value="#000000" />
+    <output id="bgValue">#000000</output>
+
+    <label>FPS</label>
+    <output id="fpsValue" style="grid-column: 2 / 4; text-align: right;">60</output>
+  </div>
+
+  <div id="app"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/8.6.6/pixi.min.js"></script>
+  <script>
+  // --- Wipe transitions ------------------------------------------------
+  // A front sweeps across the grid on a loop (with a short hold). Squares
+  // behind it are full size, ahead are gone, and at the moving edge they
+  // spin as they pop in. Drives size AND rotation together.
+  (async () => {
+    const GAP = 1;
+    const TWO_PI = Math.PI * 2;
+    const HOLD = 0.35;        // fraction of the cycle spent fully revealed
+    const IMAGE_URL = './img/inderes_logo.svg';
+
+    const bgInput = document.getElementById('bg');
+    const bgValue = document.getElementById('bgValue');
+    const app = new PIXI.Application();
+    await app.init({ background: bgInput.value, resizeTo: window, antialias: true });
+    document.getElementById('app').appendChild(app.canvas);
+    const fpsValue = document.getElementById('fpsValue');
+    let fpsFrames = 0, fpsLast = performance.now();
+    app.ticker.add(() => {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - fpsLast >= 500) {
+        fpsValue.textContent = Math.round((fpsFrames * 1000) / (now - fpsLast));
+        fpsFrames = 0;
+        fpsLast = now;
+      }
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        const panel = document.querySelector('.controls');
+        if (panel) panel.hidden = !panel.hidden;
+      }
+    });
+    bgInput.addEventListener('input', () => {
+      bgValue.textContent = bgInput.value;
+      app.renderer.background.color = bgInput.value;
+      document.body.style.background = bgInput.value;
+    });
+
+    const image = new Image();
+    image.src = IMAGE_URL;
+    await image.decode();
+    const squareTexture = PIXI.Texture.from(image);
+
+    const grid = new PIXI.Container();
+    app.stage.addChild(grid);
+    const pool = [];
+    const squares = [];
+    let cols = 0, rows = 0;
+
+    function buildGrid(squareSize) {
+      cols = Math.ceil(app.screen.width / squareSize);
+      rows = Math.ceil(app.screen.height / squareSize);
+      const needed = cols * rows;
+      while (pool.length < needed) {
+        const sprite = new PIXI.Sprite(squareTexture);
+        sprite.anchor.set(0.5);
+        pool.push(sprite);
+        grid.addChild(sprite);
+      }
+      squares.length = 0;
+      let i = 0;
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const sprite = pool[i++];
+          sprite.visible = true;
+          sprite.width = squareSize - GAP;
+          sprite.height = squareSize - GAP;
+          sprite.x = col * squareSize + squareSize / 2;
+          sprite.y = row * squareSize + squareSize / 2;
+          squares.push({ sprite, col, row });
+        }
+      }
+      for (; i < pool.length; i++) pool[i].visible = false;
+    }
+
+    // Per-cell position along the wipe, 0..1, depending on the shape.
+    function shapeCoord(shape, col, row, cx, cy, maxR) {
+      switch (shape) {
+        case 'bars': {
+          const v = (col / cols) * 6;
+          return v - Math.floor(v);
+        }
+        case 'radial':
+          return Math.hypot(col - cx, row - cy) / maxR;
+        case 'wedge':
+          return (Math.atan2(row - cy, col - cx) / TWO_PI + 0.5);
+        case 'spiral': {
+          const ang = Math.atan2(row - cy, col - cx) / TWO_PI + 0.5;
+          const rad = Math.hypot(col - cx, row - cy) / maxR;
+          const v = ang + rad * 2.0;
+          return v - Math.floor(v);
+        }
+        case 'diagonal':
+        default:
+          return (col / cols + row / rows) / 2;
+      }
+    }
+
+    const sizeSlider = document.getElementById('size');
+    const sizeValue = document.getElementById('sizeValue');
+    const speedSlider = document.getElementById('speed');
+    const speedValue = document.getElementById('speedValue');
+    const bandSlider = document.getElementById('band');
+    const bandValue = document.getElementById('bandValue');
+    const spinSlider = document.getElementById('spin');
+    const spinValue = document.getElementById('spinValue');
+    const shapeSel = document.getElementById('shape');
+
+    function rebuild() {
+      const size = Number(sizeSlider.value);
+      sizeValue.textContent = size + 'px';
+      buildGrid(size);
+    }
+    sizeSlider.addEventListener('input', rebuild);
+    speedSlider.addEventListener('input', () => { speedValue.textContent = speedSlider.value; });
+    bandSlider.addEventListener('input', () => { bandValue.textContent = bandSlider.value + '%'; });
+    spinSlider.addEventListener('input', () => { spinValue.textContent = spinSlider.value + '%'; });
+
+    let lastW = 0, lastH = 0;
+    function fitToWindow() {
+      const w = window.innerWidth, h = window.innerHeight;
+      if (w === lastW && h === lastH) return;
+      lastW = w; lastH = h;
+      app.renderer.resize(w, h);
+      buildGrid(Number(sizeSlider.value));
+    }
+    window.addEventListener('resize', fitToWindow);
+    window.addEventListener('orientationchange', fitToWindow);
+
+    let time = 0;
+    app.ticker.add((ticker) => {
+      fitToWindow();
+      time += (ticker.deltaMS / 1000) * (Number(speedSlider.value) / 100);
+      const band = Number(bandSlider.value) / 100;      // soft-edge width, 0..1
+      const spin = Number(spinSlider.value) / 100 * TWO_PI;
+      const cell = Number(sizeSlider.value) - GAP;
+      const shape = shapeSel.value;
+      const cx = cols / 2, cy = rows / 2;
+      const maxR = Math.hypot(cols, rows) / 2;
+
+      // Wipe front: travels 0 -> 1 over the cycle, then holds fully revealed.
+      const phase = time % (1 + HOLD);
+      const front = Math.min(1, phase);
+
+      for (const s of squares) {
+        const coord = shapeCoord(shape, s.col, s.row, cx, cy, maxR);
+        const d = coord - front;                   // >0 = not revealed yet
+        let level = 0.5 - d / band;                // soft crossfade at the edge
+        level = level < 0 ? 0 : level > 1 ? 1 : level;
+        const edgeProx = Math.max(0, 1 - Math.abs(d) / band);
+        s.sprite.rotation = edgeProx * spin;
+        const size = Math.max(0, cell * level);
+        s.sprite.width = size;
+        s.sprite.height = size;
+      }
+    });
+
+    rebuild();
+  })();
+  </script>
+</body>
+</html>

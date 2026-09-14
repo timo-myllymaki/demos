@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pixi Phyllotaxis Grid</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000000; }
+  #app canvas { display: block; }
+  .controls {
+    position: fixed; left: 16px; top: 16px; z-index: 10;
+    display: grid; grid-template-columns: auto 200px 56px;
+    align-items: center; gap: 10px 12px;
+    padding: 12px 16px; border-radius: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+    font: 14px/1 system-ui, sans-serif; color: #222;
+  }
+.controls[hidden] { display: none; }
+  .controls input[type="range"] { width: 100%; }
+  .controls input[type="color"] {
+    width: 44px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
+  }
+  .controls output { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <div class="controls">
+    <label for="count">Elements</label>
+    <input id="count" type="range" min="100" max="2400" step="20" value="900" />
+    <output id="countValue">900</output>
+
+    <label for="dot">Element size</label>
+    <input id="dot" type="range" min="4" max="400" step="1" value="18" />
+    <output id="dotValue">18px</output>
+
+    <label for="angle">Divergence offset</label>
+    <input id="angle" type="range" min="-500" max="500" step="1" value="0" />
+    <output id="angleValue">0.000&deg;</output>
+
+    <label for="spin">Spin speed</label>
+    <input id="spin" type="range" min="-100" max="100" step="0.01" value="20" />
+    <output id="spinValue">20%</output>
+
+    <label for="spread">Spread</label>
+    <input id="spread" type="range" min="40" max="180" step="1" value="100" />
+    <output id="spreadValue">1.00</output>
+
+    <label for="bg">Background</label>
+    <input id="bg" type="color" value="#000000" />
+    <output id="bgValue">#000000</output>
+
+    <label>FPS</label>
+    <output id="fpsValue" style="grid-column: 2 / 4; text-align: right;">60</output>
+  </div>
+
+  <div id="app"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/8.6.6/pixi.min.js"></script>
+  <script>
+  // --- Phyllotaxis spiral ---------------------------------------
+  // No grid. Image elements are placed on a Vogel sunflower spiral,
+  //   r = c * sqrt(i),  theta = i * golden_angle
+  // and the divergence angle is nudged around the golden angle -- tiny
+  // changes swing the pattern between different spiral-arm counts.
+  (async () => {
+    const GOLDEN = Math.PI * (3 - Math.sqrt(5)); // ~137.507 degrees
+    const DEG = Math.PI / 180;
+    const IMAGE_URL = './img/inderes_logo.svg';
+
+    const bgInput = document.getElementById('bg');
+    const bgValue = document.getElementById('bgValue');
+    const app = new PIXI.Application();
+    await app.init({ background: bgInput.value, resizeTo: window, antialias: true });
+    document.getElementById('app').appendChild(app.canvas);
+    const fpsValue = document.getElementById('fpsValue');
+    let fpsFrames = 0, fpsLast = performance.now();
+    app.ticker.add(() => {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - fpsLast >= 500) {
+        fpsValue.textContent = Math.round((fpsFrames * 1000) / (now - fpsLast));
+        fpsFrames = 0;
+        fpsLast = now;
+      }
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        const panel = document.querySelector('.controls');
+        if (panel) panel.hidden = !panel.hidden;
+      }
+    });
+    bgInput.addEventListener('input', () => {
+      bgValue.textContent = bgInput.value;
+      app.renderer.background.color = bgInput.value;
+      document.body.style.background = bgInput.value;
+    });
+
+    const image = new Image();
+    image.src = IMAGE_URL;
+    await image.decode();
+    const tex = PIXI.Texture.from(image);
+
+    const layer = new PIXI.Container();
+    app.stage.addChild(layer);
+    const pool = [];
+    let count = 0;
+
+    function setCount(n) {
+      count = n;
+      while (pool.length < n) {
+        const s = new PIXI.Sprite(tex);
+        s.anchor.set(0.5);
+        pool.push(s);
+        layer.addChild(s);
+      }
+      for (let i = 0; i < pool.length; i++) pool[i].visible = i < n;
+    }
+
+    const countSlider = document.getElementById('count');
+    const countValue = document.getElementById('countValue');
+    const dotSlider = document.getElementById('dot');
+    const dotValue = document.getElementById('dotValue');
+    const angleSlider = document.getElementById('angle');
+    const angleValue = document.getElementById('angleValue');
+    const spinSlider = document.getElementById('spin');
+    const spinValue = document.getElementById('spinValue');
+    const spreadSlider = document.getElementById('spread');
+    const spreadValue = document.getElementById('spreadValue');
+
+    countSlider.addEventListener('input', () => { countValue.textContent = countSlider.value; setCount(Number(countSlider.value)); });
+    dotSlider.addEventListener('input', () => { dotValue.textContent = dotSlider.value + 'px'; });
+    angleSlider.addEventListener('input', () => { angleValue.textContent = (Number(angleSlider.value) / 1000).toFixed(3) + '°'; });
+    spinSlider.addEventListener('input', () => { spinValue.textContent = spinSlider.value + '%'; });
+    spreadSlider.addEventListener('input', () => { spreadValue.textContent = (Number(spreadSlider.value) / 100).toFixed(2); });
+
+    let lastW = 0, lastH = 0;
+    function fitToWindow() {
+      const w = window.innerWidth, h = window.innerHeight;
+      if (w === lastW && h === lastH) return;
+      lastW = w; lastH = h;
+      app.renderer.resize(w, h);
+    }
+    window.addEventListener('resize', fitToWindow);
+    window.addEventListener('orientationchange', fitToWindow);
+
+    setCount(Number(countSlider.value));
+
+    let spin = 0;
+    app.ticker.add((ticker) => {
+      fitToWindow();
+      const dot = Number(dotSlider.value);
+      const diverge = GOLDEN + Number(angleSlider.value) / 1000 * DEG;
+      const spread = Number(spreadSlider.value) / 100;
+      spin += ticker.deltaMS * 0.0004 * (Number(spinSlider.value) / 100);
+
+      const cx = app.screen.width / 2;
+      const cy = app.screen.height / 2;
+      // Scale so the outermost element sits near the shorter screen edge.
+      const c = Math.min(cx, cy) * 0.94 * spread / Math.sqrt(Math.max(1, count));
+
+      for (let i = 0; i < count; i++) {
+        const r = c * Math.sqrt(i + 0.5);
+        const theta = i * diverge + spin;
+        const s = pool[i];
+        s.x = cx + r * Math.cos(theta);
+        s.y = cy + r * Math.sin(theta);
+        s.rotation = theta;
+        // Fade the size down toward the rim for a little depth.
+        const k = 1 - (i / count) * 0.55;
+        s.width = dot * k;
+        s.height = dot * k;
+      }
+    });
+  })();
+  </script>
+</body>
+</html>

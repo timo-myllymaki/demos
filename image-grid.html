@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pixi Image Grid</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000000; }
+  #app canvas { display: block; }
+
+  .controls {
+    position: fixed;
+    left: 16px;
+    top: 16px;
+    z-index: 10;
+    display: grid;
+    grid-template-columns: auto 200px 56px;
+    align-items: center;
+    gap: 10px 12px;
+    padding: 12px 16px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+    font: 14px/1 system-ui, sans-serif;
+    color: #222;
+  }
+.controls[hidden] { display: none; }
+  .controls input[type="range"] { width: 100%; }
+  .controls input[type="color"] {
+    width: 44px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
+  }
+  .controls output { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <div class="controls">
+    <label for="size">Square size</label>
+    <input id="size" type="range" min="10" max="400" step="1" value="82" />
+    <output id="sizeValue">82px</output>
+
+    <label for="noise">Noise amount</label>
+    <input id="noise" type="range" min="0" max="100" step="1" value="55" />
+    <output id="noiseValue">55%</output>
+
+    <label for="speed">Noise speed</label>
+    <input id="speed" type="range" min="0.01" max="300" step="0.01" value="52" />
+    <output id="speedValue">52%</output>
+
+    <label for="freq">Noise frequency</label>
+    <input id="freq" type="range" min="2" max="60" step="1" value="8" />
+    <output id="freqValue">0.08</output>
+
+    <label for="bg">Background</label>
+    <input id="bg" type="color" value="#000000" />
+    <output id="bgValue">#000000</output>
+
+    <label>FPS</label>
+    <output id="fpsValue" style="grid-column: 2 / 4; text-align: right;">60</output>
+  </div>
+
+  <div id="app"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/8.6.6/pixi.min.js"></script>
+  <script>
+  // --- 3D simplex noise -------------------------------------------------------
+  // Public-domain implementation after Stefan Gustavson. Returns values in
+  // roughly [-1, 1]. Sampling a moving z coordinate animates the field.
+  const noise3D = (() => {
+    const grad3 = [
+      1,1,0, -1,1,0, 1,-1,0, -1,-1,0,
+      1,0,1, -1,0,1, 1,0,-1, -1,0,-1,
+      0,1,1, 0,-1,1, 0,1,-1, 0,-1,-1,
+    ];
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    // Deterministic shuffle so the motion is the same on every load.
+    let seed = 1337;
+    const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 255; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [p[i], p[j]] = [p[j], p[i]];
+    }
+    const perm = new Uint8Array(512);
+    const permMod12 = new Uint8Array(512);
+    for (let i = 0; i < 512; i++) {
+      perm[i] = p[i & 255];
+      permMod12[i] = perm[i] % 12;
+    }
+
+    const F3 = 1 / 3;
+    const G3 = 1 / 6;
+
+    return function (x, y, z) {
+      let n0, n1, n2, n3;
+      const s = (x + y + z) * F3;
+      const i = Math.floor(x + s);
+      const j = Math.floor(y + s);
+      const k = Math.floor(z + s);
+      const t = (i + j + k) * G3;
+      const x0 = x - (i - t);
+      const y0 = y - (j - t);
+      const z0 = z - (k - t);
+
+      let i1, j1, k1, i2, j2, k2;
+      if (x0 >= y0) {
+        if (y0 >= z0)      { i1=1; j1=0; k1=0; i2=1; j2=1; k2=0; }
+        else if (x0 >= z0) { i1=1; j1=0; k1=0; i2=1; j2=0; k2=1; }
+        else               { i1=0; j1=0; k1=1; i2=1; j2=0; k2=1; }
+      } else {
+        if (y0 < z0)       { i1=0; j1=0; k1=1; i2=0; j2=1; k2=1; }
+        else if (x0 < z0)  { i1=0; j1=1; k1=0; i2=0; j2=1; k2=1; }
+        else               { i1=0; j1=1; k1=0; i2=1; j2=1; k2=0; }
+      }
+
+      const x1 = x0 - i1 + G3,  y1 = y0 - j1 + G3,       z1 = z0 - k1 + G3;
+      const x2 = x0 - i2 + 2*G3, y2 = y0 - j2 + 2*G3,    z2 = z0 - k2 + 2*G3;
+      const x3 = x0 - 1 + 3*G3,  y3 = y0 - 1 + 3*G3,     z3 = z0 - 1 + 3*G3;
+
+      const ii = i & 255, jj = j & 255, kk = k & 255;
+
+      let t0 = 0.6 - x0*x0 - y0*y0 - z0*z0;
+      if (t0 < 0) n0 = 0;
+      else {
+        const gi0 = permMod12[ii + perm[jj + perm[kk]]] * 3;
+        t0 *= t0;
+        n0 = t0 * t0 * (grad3[gi0]*x0 + grad3[gi0+1]*y0 + grad3[gi0+2]*z0);
+      }
+
+      let t1 = 0.6 - x1*x1 - y1*y1 - z1*z1;
+      if (t1 < 0) n1 = 0;
+      else {
+        const gi1 = permMod12[ii + i1 + perm[jj + j1 + perm[kk + k1]]] * 3;
+        t1 *= t1;
+        n1 = t1 * t1 * (grad3[gi1]*x1 + grad3[gi1+1]*y1 + grad3[gi1+2]*z1);
+      }
+
+      let t2 = 0.6 - x2*x2 - y2*y2 - z2*z2;
+      if (t2 < 0) n2 = 0;
+      else {
+        const gi2 = permMod12[ii + i2 + perm[jj + j2 + perm[kk + k2]]] * 3;
+        t2 *= t2;
+        n2 = t2 * t2 * (grad3[gi2]*x2 + grad3[gi2+1]*y2 + grad3[gi2+2]*z2);
+      }
+
+      let t3 = 0.6 - x3*x3 - y3*y3 - z3*z3;
+      if (t3 < 0) n3 = 0;
+      else {
+        const gi3 = permMod12[ii + 1 + perm[jj + 1 + perm[kk + 1]]] * 3;
+        t3 *= t3;
+        n3 = t3 * t3 * (grad3[gi3]*x3 + grad3[gi3+1]*y3 + grad3[gi3+2]*z3);
+      }
+
+      return 32 * (n0 + n1 + n2 + n3);
+    };
+  })();
+
+  // Wavy fractal noise: stacked octaves so the field ripples instead of just
+  // rolling in smooth blobs.
+  function wavy(x, y, z) {
+    return noise3D(x, y, z) * 0.55
+         + noise3D(x * 2.3, y * 2.3, z * 1.4) * 0.30
+         + noise3D(x * 4.7, y * 4.7, z * 1.9) * 0.15;
+  }
+
+  // --- Pixi app -------------------------------------------------------------
+  (async () => {
+    const GAP = 1;             // px gap between squares so the grid reads as divided
+    const TIME_SPEED = 0.0009; // base churn rate (scaled by the speed slider)
+    const FLOW_SPEED = 0.0016; // base right -> left travel rate (scaled by the speed slider)
+    const IMAGE_URL = './img/inderes_logo.svg'; // each square is this image (relative to this file)
+
+    const bgInput = document.getElementById('bg');
+    const bgValue = document.getElementById('bgValue');
+    const app = new PIXI.Application();
+    await app.init({
+      background: bgInput.value,
+      resizeTo: window,
+      antialias: true,
+    });
+    document.getElementById('app').appendChild(app.canvas);
+    const fpsValue = document.getElementById('fpsValue');
+    let fpsFrames = 0, fpsLast = performance.now();
+    app.ticker.add(() => {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - fpsLast >= 500) {
+        fpsValue.textContent = Math.round((fpsFrames * 1000) / (now - fpsLast));
+        fpsFrames = 0;
+        fpsLast = now;
+      }
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        const panel = document.querySelector('.controls');
+        if (panel) panel.hidden = !panel.hidden;
+      }
+    });
+    bgInput.addEventListener('input', () => {
+      bgValue.textContent = bgInput.value;
+      app.renderer.background.color = bgInput.value;
+      document.body.style.background = bgInput.value;
+    });
+
+    // Load the image once; every square is a sprite sharing this one texture.
+    // Go through an <img> element (rather than PIXI.Assets / fetch) so it also
+    // works when the file is opened directly from disk (file://).
+    const image = new Image();
+    image.src = IMAGE_URL;
+    await image.decode();
+    const squareTexture = PIXI.Texture.from(image);
+
+    const grid = new PIXI.Container();
+    app.stage.addChild(grid);
+
+    const pool = [];    // reusable PIXI.Sprite pool
+    const squares = []; // active squares: { sprite, col, row, baseX, baseY }
+
+    function buildGrid(squareSize) {
+      const cols = Math.ceil(app.screen.width / squareSize);
+      const rows = Math.ceil(app.screen.height / squareSize);
+      const needed = cols * rows;
+
+      while (pool.length < needed) {
+        const sprite = new PIXI.Sprite(squareTexture);
+        sprite.anchor.set(0.5); // anchor at the center of each square
+        pool.push(sprite);
+        grid.addChild(sprite);
+      }
+
+      squares.length = 0;
+      let i = 0;
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const sprite = pool[i++];
+          sprite.visible = true;
+          sprite.width = squareSize - GAP;
+          sprite.height = squareSize - GAP;
+          const baseX = col * squareSize + squareSize / 2;
+          const baseY = row * squareSize + squareSize / 2;
+          sprite.x = baseX;
+          sprite.y = baseY;
+          squares.push({ sprite, col, row, baseX, baseY });
+        }
+      }
+      for (; i < pool.length; i++) pool[i].visible = false;
+    }
+
+    const sizeSlider = document.getElementById('size');
+    const sizeValue = document.getElementById('sizeValue');
+    const noiseSlider = document.getElementById('noise');
+    const noiseValue = document.getElementById('noiseValue');
+    const speedSlider = document.getElementById('speed');
+    const speedValue = document.getElementById('speedValue');
+    const freqSlider = document.getElementById('freq');
+    const freqValue = document.getElementById('freqValue');
+
+    function rebuild() {
+      const size = Number(sizeSlider.value);
+      sizeValue.textContent = size + 'px';
+      buildGrid(size);
+    }
+
+    sizeSlider.addEventListener('input', rebuild);
+    noiseSlider.addEventListener('input', () => {
+      noiseValue.textContent = noiseSlider.value + '%';
+    });
+    speedSlider.addEventListener('input', () => {
+      speedValue.textContent = speedSlider.value + '%';
+    });
+    freqSlider.addEventListener('input', () => {
+      freqValue.textContent = (Number(freqSlider.value) / 100).toFixed(2);
+    });
+
+    // Keep the canvas and the grid covering the whole window on resize. The
+    // renderer is sized explicitly (rather than trusting Pixi's debounced
+    // `resizeTo`) so the grid is re-tiled against the up-to-date dimensions.
+    let lastW = 0;
+    let lastH = 0;
+    function fitToWindow() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      if (w === lastW && h === lastH) return;
+      lastW = w;
+      lastH = h;
+      app.renderer.resize(w, h);
+      buildGrid(Number(sizeSlider.value));
+    }
+    window.addEventListener('resize', fitToWindow);
+    window.addEventListener('orientationchange', fitToWindow);
+
+    // Animate: each square stays centered on its cell (anchor 0.5) and the wavy
+    // noise field only scales it — full cell where the field is high, shrinking
+    // toward a dot where it is low. The sample coordinate scrolls in +x over
+    // time, so the pattern travels right -> left.
+    let time = 0;
+    let flow = 0;
+    app.ticker.add((ticker) => {
+      fitToWindow(); // safety net in case a resize event was missed / debounced
+      const speed = Number(speedSlider.value) / 100;
+      const freq = Number(freqSlider.value) / 100;
+      const amount = Number(noiseSlider.value) / 100; // 0 = uniform, 1 = full range
+      const cell = Number(sizeSlider.value) - GAP;
+      time += ticker.deltaMS * TIME_SPEED * speed;
+      flow += ticker.deltaMS * FLOW_SPEED * speed;
+      for (const s of squares) {
+        const n = wavy(s.col * freq + flow, s.row * freq, time);      // ~[-1, 1]
+        const level = Math.min(1, Math.max(0, n * 0.5 + 0.5));        // [0, 1]
+        const scale = 1 - amount * (1 - level);                  // 1 when amount = 0
+        const size = Math.max(0, cell * scale);
+        s.sprite.width = size;
+        s.sprite.height = size;
+      }
+    });
+
+    rebuild();
+  })();
+  </script>
+</body>
+</html>

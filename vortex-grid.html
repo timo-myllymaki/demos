@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pixi Vortex Grid</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000000; }
+  #app canvas { display: block; }
+  .controls {
+    position: fixed; left: 16px; top: 16px; z-index: 10;
+    display: grid; grid-template-columns: auto 200px 56px;
+    align-items: center; gap: 10px 12px;
+    padding: 12px 16px; border-radius: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+    font: 14px/1 system-ui, sans-serif; color: #222;
+  }
+.controls[hidden] { display: none; }
+  .controls input[type="range"] { width: 100%; }
+  .controls input[type="color"] {
+    width: 44px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
+  }
+  .controls output { font-variant-numeric: tabular-nums; }
+  .tip {
+    position: fixed; left: 16px; bottom: 14px; z-index: 10;
+    font: 12px/1 system-ui, sans-serif; color: #888;
+    background: rgba(255, 255, 255, 0.7); padding: 6px 10px; border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+  <div class="controls">
+    <label for="count">Particles</label>
+    <input id="count" type="range" min="200" max="4000" step="50" value="1600" />
+    <output id="countValue">1600</output>
+
+    <label for="psize">Particle size</label>
+    <input id="psize" type="range" min="3" max="400" step="1" value="12" />
+    <output id="psizeValue">12px</output>
+
+    <label for="vcount">Vortices</label>
+    <input id="vcount" type="range" min="1" max="10" step="1" value="4" />
+    <output id="vcountValue">4</output>
+
+    <label for="vstr">Vortex strength</label>
+    <input id="vstr" type="range" min="0" max="200" step="1" value="90" />
+    <output id="vstrValue">90%</output>
+
+    <label for="balance">Noise / vortex</label>
+    <input id="balance" type="range" min="0" max="100" step="1" value="35" />
+    <output id="balanceValue">35%</output>
+
+    <label for="bg">Background</label>
+    <input id="bg" type="color" value="#000000" />
+    <output id="bgValue">#000000</output>
+
+    <label>FPS</label>
+    <output id="fpsValue" style="grid-column: 2 / 4; text-align: right;">60</output>
+  </div>
+
+  <div class="tip">click to drop a vortex</div>
+  <div id="app"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/8.6.6/pixi.min.js"></script>
+  <script>
+  // --- 3D simplex noise (public domain, after Stefan Gustavson) ---------
+  const noise3D = (() => {
+    const grad3 = [1,1,0,-1,1,0,1,-1,0,-1,-1,0,1,0,1,-1,0,1,1,0,-1,-1,0,-1,0,1,1,0,-1,1,0,1,-1,0,-1,-1];
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    let seed = 1337;
+    const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 255; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
+    const perm = new Uint8Array(512), permMod12 = new Uint8Array(512);
+    for (let i = 0; i < 512; i++) { perm[i] = p[i & 255]; permMod12[i] = perm[i] % 12; }
+    const F3 = 1 / 3, G3 = 1 / 6;
+    return function (x, y, z) {
+      let n0, n1, n2, n3;
+      const s = (x + y + z) * F3;
+      const i = Math.floor(x + s), j = Math.floor(y + s), k = Math.floor(z + s);
+      const t = (i + j + k) * G3;
+      const x0 = x - (i - t), y0 = y - (j - t), z0 = z - (k - t);
+      let i1, j1, k1, i2, j2, k2;
+      if (x0 >= y0) {
+        if (y0 >= z0)      { i1=1;j1=0;k1=0;i2=1;j2=1;k2=0; }
+        else if (x0 >= z0) { i1=1;j1=0;k1=0;i2=1;j2=0;k2=1; }
+        else               { i1=0;j1=0;k1=1;i2=1;j2=0;k2=1; }
+      } else {
+        if (y0 < z0)       { i1=0;j1=0;k1=1;i2=0;j2=1;k2=1; }
+        else if (x0 < z0)  { i1=0;j1=1;k1=0;i2=0;j2=1;k2=1; }
+        else               { i1=0;j1=1;k1=0;i2=1;j2=1;k2=0; }
+      }
+      const x1=x0-i1+G3, y1=y0-j1+G3, z1=z0-k1+G3;
+      const x2=x0-i2+2*G3, y2=y0-j2+2*G3, z2=z0-k2+2*G3;
+      const x3=x0-1+3*G3, y3=y0-1+3*G3, z3=z0-1+3*G3;
+      const ii=i&255, jj=j&255, kk=k&255;
+      let t0=0.6-x0*x0-y0*y0-z0*z0;
+      if (t0<0) n0=0; else { const gi0=permMod12[ii+perm[jj+perm[kk]]]*3; t0*=t0; n0=t0*t0*(grad3[gi0]*x0+grad3[gi0+1]*y0+grad3[gi0+2]*z0); }
+      let t1=0.6-x1*x1-y1*y1-z1*z1;
+      if (t1<0) n1=0; else { const gi1=permMod12[ii+i1+perm[jj+j1+perm[kk+k1]]]*3; t1*=t1; n1=t1*t1*(grad3[gi1]*x1+grad3[gi1+1]*y1+grad3[gi1+2]*z1); }
+      let t2=0.6-x2*x2-y2*y2-z2*z2;
+      if (t2<0) n2=0; else { const gi2=permMod12[ii+i2+perm[jj+j2+perm[kk+k2]]]*3; t2*=t2; n2=t2*t2*(grad3[gi2]*x2+grad3[gi2+1]*y2+grad3[gi2+2]*z2); }
+      let t3=0.6-x3*x3-y3*y3-z3*z3;
+      if (t3<0) n3=0; else { const gi3=permMod12[ii+1+perm[jj+1+perm[kk+1]]]*3; t3*=t3; n3=t3*t3*(grad3[gi3]*x3+grad3[gi3+1]*y3+grad3[gi3+2]*z3); }
+      return 32 * (n0 + n1 + n2 + n3);
+    };
+  })();
+
+  // --- Vortex field --------------------------------------------
+  // Particle velocity = curl noise + the rotational field of a few
+  // drifting point vortices (strength / distance, tangential).
+  // Whirlpools that wander, shear the flow, and merge.
+  (async () => {
+    const IMAGE_URL = './img/inderes_logo.svg';
+    const SOFT = 40; // vortex core softening (px)
+
+    const bgInput = document.getElementById('bg');
+    const bgValue = document.getElementById('bgValue');
+    const app = new PIXI.Application();
+    await app.init({ background: bgInput.value, resizeTo: window, antialias: true });
+    document.getElementById('app').appendChild(app.canvas);
+    const fpsValue = document.getElementById('fpsValue');
+    let fpsFrames = 0, fpsLast = performance.now();
+    app.ticker.add(() => {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - fpsLast >= 500) {
+        fpsValue.textContent = Math.round((fpsFrames * 1000) / (now - fpsLast));
+        fpsFrames = 0;
+        fpsLast = now;
+      }
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        const panel = document.querySelector('.controls');
+        if (panel) panel.hidden = !panel.hidden;
+      }
+    });
+    bgInput.addEventListener('input', () => {
+      bgValue.textContent = bgInput.value;
+      app.renderer.background.color = bgInput.value;
+      document.body.style.background = bgInput.value;
+    });
+
+    const image = new Image();
+    image.src = IMAGE_URL;
+    await image.decode();
+    const tex = PIXI.Texture.from(image);
+
+    const scene = new PIXI.Container();
+    const prevLayer = new PIXI.Sprite();
+    const pLayer = new PIXI.Container();
+    scene.addChild(prevLayer, pLayer);
+    const output = new PIXI.Sprite();
+    app.stage.addChild(output);
+
+    let rtA = null, rtB = null;
+    function makeTargets() {
+      const w = Math.max(1, app.screen.width), h = Math.max(1, app.screen.height);
+      rtA && rtA.destroy(true); rtB && rtB.destroy(true);
+      rtA = PIXI.RenderTexture.create({ width: w, height: h });
+      rtB = PIXI.RenderTexture.create({ width: w, height: h });
+      output.texture = rtA;
+    }
+    makeTargets();
+
+    const vortices = []; // { x, y, sign, vx, vy }
+    function spawnVortex(x, y) {
+      const a = Math.random() * Math.PI * 2, sp = 15 + Math.random() * 30;
+      vortices.push({
+        x: x != null ? x : Math.random() * app.screen.width,
+        y: y != null ? y : Math.random() * app.screen.height,
+        sign: Math.random() < 0.5 ? 1 : -1,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      });
+    }
+    function setVortexCount(n) {
+      while (vortices.length < n) spawnVortex();
+      vortices.length = n;
+    }
+
+    const particles = [];
+    const pool = [];
+    function setCount(n) {
+      while (pool.length < n) {
+        const s = new PIXI.Sprite(tex);
+        s.anchor.set(0.5);
+        pool.push(s);
+        pLayer.addChild(s);
+      }
+      particles.length = 0;
+      for (let i = 0; i < pool.length; i++) {
+        const s = pool[i];
+        if (i < n) {
+          s.visible = true;
+          particles.push({ x: Math.random() * app.screen.width, y: Math.random() * app.screen.height });
+        } else s.visible = false;
+      }
+    }
+
+    const countSlider = document.getElementById('count');
+    const countValue = document.getElementById('countValue');
+    const psizeSlider = document.getElementById('psize');
+    const psizeValue = document.getElementById('psizeValue');
+    const vcountSlider = document.getElementById('vcount');
+    const vcountValue = document.getElementById('vcountValue');
+    const vstrSlider = document.getElementById('vstr');
+    const vstrValue = document.getElementById('vstrValue');
+    const balanceSlider = document.getElementById('balance');
+    const balanceValue = document.getElementById('balanceValue');
+
+    countSlider.addEventListener('input', () => { countValue.textContent = countSlider.value; setCount(Number(countSlider.value)); });
+    psizeSlider.addEventListener('input', () => { psizeValue.textContent = psizeSlider.value + 'px'; });
+    vcountSlider.addEventListener('input', () => { vcountValue.textContent = vcountSlider.value; setVortexCount(Number(vcountSlider.value)); });
+    vstrSlider.addEventListener('input', () => { vstrValue.textContent = vstrSlider.value + '%'; });
+    balanceSlider.addEventListener('input', () => { balanceValue.textContent = balanceSlider.value + '%'; });
+
+    window.addEventListener('pointerdown', (e) => {
+      if (e.target.closest && e.target.closest('.controls')) return;
+      spawnVortex(e.clientX, e.clientY);
+      vcountSlider.value = vortices.length;
+      vcountValue.textContent = vortices.length;
+    });
+
+    let lastW = 0, lastH = 0;
+    function fitToWindow() {
+      const w = window.innerWidth, h = window.innerHeight;
+      if (w === lastW && h === lastH) return;
+      lastW = w; lastH = h;
+      app.renderer.resize(w, h);
+      makeTargets();
+    }
+    window.addEventListener('resize', fitToWindow);
+    window.addEventListener('orientationchange', fitToWindow);
+
+    setCount(Number(countSlider.value));
+    setVortexCount(Number(vcountSlider.value));
+
+    let time = 0;
+    app.ticker.add((ticker) => {
+      fitToWindow();
+      const dt = Math.min(2, ticker.deltaMS / 16);
+      const psize = Number(psizeSlider.value);
+      const vstr = Number(vstrSlider.value) / 100 * 2200;
+      const noiseMix = Number(balanceSlider.value) / 100;
+      const W = app.screen.width, H = app.screen.height;
+      time += ticker.deltaMS * 0.0004;
+
+      for (const v of vortices) {
+        v.x += v.vx * dt * 0.5; v.y += v.vy * dt * 0.5;
+        if (v.x < 0) { v.x = 0; v.vx = Math.abs(v.vx); } else if (v.x > W) { v.x = W; v.vx = -Math.abs(v.vx); }
+        if (v.y < 0) { v.y = 0; v.vy = Math.abs(v.vy); } else if (v.y > H) { v.y = H; v.vy = -Math.abs(v.vy); }
+      }
+
+      const eps = 0.04, freq = 0.0013;
+      for (const p of particles) {
+        // curl noise
+        const nx = p.x * freq, ny = p.y * freq;
+        const a = noise3D(nx, ny + eps, time), b = noise3D(nx, ny - eps, time);
+        const c = noise3D(nx + eps, ny, time), d = noise3D(nx - eps, ny, time);
+        let vx = ((a - b) / (2 * eps)) * 2.4 * noiseMix;
+        let vy = (-(c - d) / (2 * eps)) * 2.4 * noiseMix;
+        // vortices: tangential, ~ strength / distance
+        for (const v of vortices) {
+          const dx = p.x - v.x, dy = p.y - v.y;
+          const d2 = dx * dx + dy * dy + SOFT * SOFT;
+          const f = (v.sign * vstr) / d2;
+          vx += -dy * f;
+          vy += dx * f;
+        }
+        p.x += vx * dt; p.y += vy * dt;
+        if (p.x < -10) p.x += W + 20; else if (p.x > W + 10) p.x -= W + 20;
+        if (p.y < -10) p.y += H + 20; else if (p.y > H + 10) p.y -= H + 20;
+      }
+
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i], s = pool[i];
+        s.x = p.x; s.y = p.y;
+        s.width = psize; s.height = psize;
+      }
+
+      prevLayer.texture = rtA;
+      prevLayer.alpha = 0.86;
+      app.renderer.render({ container: scene, target: rtB, clear: true });
+      const t = rtA; rtA = rtB; rtB = t;
+      output.texture = rtA;
+    });
+  })();
+  </script>
+</body>
+</html>
